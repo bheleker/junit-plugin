@@ -50,6 +50,7 @@ import io.jenkins.plugins.junit.checks.JUnitChecksPublisher;
 import io.jenkins.plugins.junit.storage.FileJunitTestResultStorage;
 import io.jenkins.plugins.junit.storage.JunitTestResultStorage;
 import jenkins.tasks.SimpleBuildStep;
+import org.jenkinsci.plugins.workflow.graph.FlowNode;
 import org.apache.tools.ant.DirectoryScanner;
 import org.apache.tools.ant.types.FileSet;
 import org.kohsuke.stapler.AncestorInPath;
@@ -178,6 +179,13 @@ public class JUnitResultArchiver extends Recorder implements SimpleBuildStep, JU
             build.setResult(Result.UNSTABLE);
         }
     }
+    
+    public void perform(Run build, FilePath workspace, Launcher launcher,
+            TaskListener listener, FlowNode node) throws InterruptedException, IOException {
+        if (parseAndSummarize(this, null, build, workspace, launcher, listener, node).getFailCount() > 0 && !skipMarkingBuildUnstable) {
+            build.setResult(Result.UNSTABLE);
+        }
+    }
 
     /** @deprecated use {@link #parseAndSummarize} instead */
     @Deprecated
@@ -238,6 +246,95 @@ public class JUnitResultArchiver extends Recorder implements SimpleBuildStep, JU
         }
     }
 
+    public static TestResultSummary parseAndSummarize(@NonNull JUnitTask task, PipelineTestDetails pipelineTestDetails,
+                                                  Run<?, ?> build, FilePath workspace, Launcher launcher, TaskListener listener, FlowNode node)
+            throws InterruptedException, IOException {
+        JunitTestResultStorage storage = JunitTestResultStorage.find();
+        if (storage instanceof FileJunitTestResultStorage) {
+            listener.getLogger().println(Messages.JUnitResultArchiver_Recording());
+        } // else let storage decide what to print
+
+        String testResults = build.getEnvironment(listener).expand(task.getTestResults());
+
+        TestResult result;
+        TestResultSummary summary;
+        if (storage instanceof FileJunitTestResultStorage) {
+            result = parse(task, pipelineTestDetails, testResults, build, workspace, launcher, listener);
+            summary = null; // see below
+        } else {
+            result = new TestResult(storage.load(build.getParent().getFullName(), build.getNumber())); // irrelevant
+            summary = new JUnitParser(task.isKeepLongStdio(), task.isKeepProperties(), task.isAllowEmptyResults(), task.isSkipOldReports())
+                    .summarizeResult(testResults, build, pipelineTestDetails, workspace, launcher, listener, storage);
+        }
+
+        synchronized (build) {
+            // TODO can the build argument be omitted now, or is it used prior to the call to addAction?
+            TestResultAction action = build.getAction(TestResultAction.class);
+            boolean appending;
+            if (action == null) {
+                appending = false;
+                action = new TestResultAction(build, result, listener);
+            } else {
+                appending = true;
+                if (storage instanceof FileJunitTestResultStorage) {
+                    result.freeze(action);
+                    action.mergeResult(result, listener);
+                }
+            }
+            if (summary == null) {
+                assert storage instanceof FileJunitTestResultStorage;
+                // Cannot do this above since the result has not yet been frozen.
+                summary = new TestResultSummary(result);
+            }
+            action.setHealthScaleFactor(task.getHealthScaleFactor()); // overwrites previous value if appending
+            if (summary.getTotalCount() == 0 && /* maybe a secondary effect */ build.getResult() != Result.FAILURE) {
+                if (task.isAllowEmptyResults()) {
+                    listener.getLogger().println(Messages.JUnitResultArchiver_ResultIsEmpty());
+                } else {
+                    throw new AbortException(Messages.JUnitResultArchiver_ResultIsEmpty());
+                }
+            }
+
+            if (task.getTestDataPublishers() != null) {
+                for (TestDataPublisher tdp : task.getTestDataPublishers()) {
+                    Data d = tdp.contributeTestData(build, workspace, launcher, listener, node, result);
+                    if (d != null) {
+                        action.addData(d);
+                    }
+                }
+            }
+
+            if (appending) {
+                build.save();
+            } else if (summary.getTotalCount() > 0) {
+                build.addAction(action);
+            }
+
+            if (!task.isSkipPublishingChecks()) {
+                // If we haven't been provided with a checks name, and we have pipeline test details, set the checks name
+                // to be a ' / '-joined string of the enclosing blocks names, plus 'Tests' at the start. If there are no
+                // enclosing blocks, you'll end up with just 'Tests'.
+                String checksName = task.getChecksName();
+                if (checksName == null && pipelineTestDetails != null) {
+                    List<String> checksComponents = new ArrayList<>(pipelineTestDetails.getEnclosingBlockNames());
+                    checksComponents.add(DEFAULT_CHECKS_NAME);
+                    Collections.reverse(checksComponents);
+                    checksName = String.join(" / ", checksComponents);
+                }
+                if (Util.fixEmpty(checksName) == null) {
+                    checksName = DEFAULT_CHECKS_NAME;
+                }
+                try {
+                    new JUnitChecksPublisher(build, checksName, result, summary).publishChecks(listener);
+                } catch (Exception x) {
+                    Functions.printStackTrace(x, listener.error("Publishing JUnit checks failed:"));
+                }
+            }
+
+            return summary;
+        }
+    }
+    
     public static TestResultSummary parseAndSummarize(@NonNull JUnitTask task, PipelineTestDetails pipelineTestDetails,
                                                   Run<?, ?> build, FilePath workspace, Launcher launcher, TaskListener listener)
             throws InterruptedException, IOException {

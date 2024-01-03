@@ -78,6 +78,39 @@ public abstract class TestDataPublisher extends AbstractDescribableImpl<TestData
         }
     }
 
+    /**
+     * Called after test results are collected by Jenkins, to create a resolver for {@link TestAction}s 
+     * must utilize the FlowNode.
+     *
+     * @param run
+     *      Run contributing test data.
+     * @param workspace
+     *      Run workspace.
+     * @param launcher
+     *      Launcher.
+     * @param listener
+     *      Listener.
+     * @param node
+     *      FlowNode.
+     * @param testResult
+     *      Test result.
+     *
+     * @return
+     *      can be null to indicate that there's nothing to contribute for this test result.
+     * @throws IOException if an error occurs.
+     * @throws InterruptedException if any thread interrupts this thread.
+     * @since 1.2-beta-1
+     */
+	public TestResultAction.Data contributeTestData(
+			Run<?,?> run, @NonNull FilePath workspace, Launcher launcher,
+			TaskListener listener, FlowNode node, TestResult testResult) throws IOException, InterruptedException {
+        if (run instanceof AbstractBuild && listener instanceof BuildListener) {
+            return getTestData((AbstractBuild) run, launcher, (BuildListener) listener, testResult);
+        } else {
+            throw new AbstractMethodError("you must override contributeTestData");
+        }
+    }
+	
     @Deprecated
 	public TestResultAction.Data getTestData(
 			AbstractBuild<?, ?> build, Launcher launcher,

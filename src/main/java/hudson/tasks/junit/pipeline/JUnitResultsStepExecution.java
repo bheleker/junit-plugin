@@ -60,7 +60,7 @@ public class JUnitResultsStepExecution extends SynchronousNonBlockingStepExecuti
                         .map(ChecksInfo::getName)
                         .ifPresent(step::setChecksName);
             }
-            TestResultSummary summary = JUnitResultArchiver.parseAndSummarize(step, pipelineTestDetails, run, workspace, launcher, listener);
+            TestResultSummary summary = JUnitResultArchiver.parseAndSummarize(step, pipelineTestDetails, run, workspace, launcher, listener, node);
 
             if (summary.getFailCount() > 0) {
                 int testFailures = summary.getFailCount();
